@@ -1,0 +1,19 @@
+# 白名單：先全部忽略，再逐一放行。
+# 影片、srt、fcpxml、截圖、工作檔、samples/ 一律不進 git（見 SPEC §8）。
+*
+!*/
+!.gitignore
+!*.md
+!*.py
+!*.html
+!*.css
+!*.js
+!*.json
+!requirements.txt
+
+# 放行規則之後再排除的
+samples/
+work/
+.venv/
+__pycache__/
+.DS_Store
