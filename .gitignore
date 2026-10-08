@@ -14,6 +14,7 @@
 # 放行規則之後再排除的
 samples/
 work/
+.claude/
 .venv/
 __pycache__/
 .DS_Store

@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SubMaker</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <strong class="brand">SubMaker</strong>
+  <form id="openForm" class="group">
+    <input id="pathInput" type="text" placeholder="影片檔路徑（可以把檔案拖進來）" spellcheck="false">
+    <button type="submit">開啟影片</button>
+  </form>
+  <div class="group">
+    <button id="srtBtn" disabled>載入 .srt</button>
+    <input id="srtFile" type="file" accept=".srt" hidden>
+  </div>
+  <div class="group" id="styleGroup">
+    <select id="presetSel" disabled></select>
+    <label>字級 <input id="sizeInput" type="number" step="1" min="1" disabled></label>
+    <label>Y <input id="yInput" type="number" step="1" disabled></label>
+    <button id="resetStyleBtn" disabled title="還原成目前預設的字級和位置">還原預設</button>
+  </div>
+  <div class="group">
+    <button id="findBtn" disabled title="Cmd + F">尋找與取代</button>
+    <button id="rulesBtn" disabled>取代規則</button>
+  </div>
+  <div class="group right">
+    <span id="saveStatus"></span>
+    <button id="exportBtn" class="primary" disabled>匯出 .fcpxml</button>
+  </div>
+</header>
+
+<main>
+  <section id="left">
+    <div id="stage">
+      <video id="video" playsinline preload="auto"></video>
+      <canvas id="overlay"></canvas>
+      <div id="stageHint">輸入影片檔路徑，按「開啟影片」</div>
+    </div>
+    <div id="controls">
+      <button id="playBtn" disabled title="空白鍵">▶</button>
+      <span id="tc" class="mono">--:--:--:--</span>
+      <input id="seek" type="range" min="0" max="0" value="0" disabled>
+      <span id="dur" class="mono">--:--:--:--</span>
+    </div>
+    <!-- 聲音波形（SPEC §4.3.3） -->
+    <div id="waveBar">
+      <div id="wave"><canvas id="waveCanvas"></canvas></div>
+      <div id="zoom">
+        <button id="zoomOut" disabled title="顯示更長的時間">－</button>
+        <span id="zoomTxt" class="mono">10 秒</span>
+        <button id="zoomIn" disabled title="顯示更短的時間">＋</button>
+      </div>
+    </div>
+    <div id="info"></div>
+    <div id="keys">
+      空白鍵 播放／暫停 · ←／→ 逐格 · Shift+←／→ 1 秒 · ↑／↓ 上／下一條 · Enter 編輯 · Esc 結束編輯 ·
+      I／O 設起點／終點 · Cmd+Z／Cmd+Shift+Z 復原／重做 · Cmd+F 尋找
+    </div>
+  </section>
+
+  <section id="right">
+    <div id="listHead">
+      <span id="listTitle">字幕</span>
+      <button id="problemBtn" class="warn" hidden></button>
+    </div>
+    <div id="list"></div>
+  </section>
+</main>
+
+<!-- 進度（SPEC §4.2：只顯示「轉換中」和進度） -->
+<div id="busy" hidden>
+  <div class="busyBox">
+    <div id="busyText">轉換中</div>
+    <progress id="busyBar" max="1" value="0"></progress>
+    <div id="busyCount" class="mono"></div>
+  </div>
+</div>
+
+<!-- 尋找與取代（SPEC §4.5），規則的「逐條確認」也用這個 -->
+<dialog id="findDlg">
+  <form method="dialog" class="dlgHead">
+    <strong id="findTitle">尋找與取代</strong>
+    <button value="close">關閉</button>
+  </form>
+  <div id="findInputs" class="row2">
+    <label>尋找 <input id="findText" type="text"></label>
+    <label>換成 <input id="replText" type="text"></label>
+  </div>
+  <div class="dlgBar">
+    <span id="findCount"></span>
+    <button id="checkAllBtn" type="button">全部勾選</button>
+    <button id="uncheckAllBtn" type="button">全部取消</button>
+    <span class="spacer"></span>
+    <button id="applyCheckedBtn" type="button">套用勾選的</button>
+    <button id="applyAllBtn" type="button" class="primary">全部套用</button>
+  </div>
+  <div id="findList"></div>
+</dialog>
+
+<!-- 取代規則清單（SPEC §4.6） -->
+<dialog id="rulesDlg">
+  <form method="dialog" class="dlgHead">
+    <strong>取代規則（所有影片共用）</strong>
+    <button value="close">關閉</button>
+  </form>
+  <table id="rulesTable">
+    <thead><tr><th>原字</th><th>換成</th><th>方式</th><th>備註</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <div class="dlgBar">
+    <button id="addRuleBtn" type="button">新增規則</button>
+    <span id="rulesStatus"></span>
+    <span class="spacer"></span>
+    <button id="saveRulesBtn" type="button">儲存</button>
+    <button id="applyRulesBtn" type="button" class="primary">儲存並一鍵套用</button>
+  </div>
+</dialog>
+
+<!-- 訊息 -->
+<dialog id="msgDlg">
+  <form method="dialog">
+    <div id="msgBody"></div>
+    <div class="dlgBar"><span class="spacer"></span><button value="ok" class="primary">好</button></div>
+  </form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
