@@ -83,29 +83,32 @@ def stop_preview(proc: subprocess.Popen, dst: Path) -> None:
     preview_tmp(dst).unlink(missing_ok=True)
 
 
-# ───────── 聲音波形（SPEC §4.3.3） ─────────
-# 解成 4000Hz 單聲道 16-bit，每 40 個取樣取一個峰值 = 每秒 100 點，存成 0~255 的位元組
+# ───────── 聲音資料與波形（SPEC §4.3.0、§4.3.3） ─────────
+# 一次解成 24kHz 單聲道 16-bit：原始取樣存成 audio.pcm 給 Web Audio 播放，
+# 同時每 240 個取樣取一個峰值 = 每秒 100 點，存成 0~255 的位元組給波形用
 
-PEAK_RATE = 4000
+AUDIO_RATE = 24000
 PEAKS_PER_SEC = 100
-_BIN = PEAK_RATE // PEAKS_PER_SEC
+_BIN = AUDIO_RATE // PEAKS_PER_SEC
 
 
-def start_peaks(src: Path) -> subprocess.Popen:
+def start_audio(src: Path) -> subprocess.Popen:
     cmd = ["ffmpeg", "-v", "error", "-i", str(src), "-map", "0:a:0", "-vn",
-           "-ac", "1", "-ar", str(PEAK_RATE), "-f", "s16le", "-"]
+           "-ac", "1", "-ar", str(AUDIO_RATE), "-f", "s16le", "-"]
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
-class PeakBuilder:
-    """一段一段餵入原始取樣，算出峰值。"""
+class AudioBuilder:
+    """一段一段餵入原始取樣：照原樣寫進 pcm 檔，同時算出峰值。"""
 
-    def __init__(self):
+    def __init__(self, pcm_file):
+        self.pcm = pcm_file
         self.peaks = bytearray()
         self.samples = 0
         self._rest = b""
 
     def feed(self, chunk: bytes) -> None:
+        self.pcm.write(chunk)
         buf = self._rest + chunk
         usable = len(buf) // (_BIN * 2) * (_BIN * 2)
         self._rest = buf[usable:]
@@ -123,3 +126,10 @@ class PeakBuilder:
             a.frombytes(self._rest[:len(self._rest) // 2 * 2])
             self.peaks.append(min(255, max(max(a), -min(a)) * 255 // 32767))
         return bytes(self.peaks)
+
+
+def wav_header(n_bytes: int) -> bytes:
+    """24kHz 單聲道 16-bit 的 WAV 檔頭，讓瀏覽器能直接解碼一段 pcm。"""
+    import struct
+    return struct.pack("<4sI4s4sIHHIIHH4sI", b"RIFF", 36 + n_bytes, b"WAVE", b"fmt ", 16, 1, 1,
+                       AUDIO_RATE, AUDIO_RATE * 2, 2, 16, b"data", n_bytes)

@@ -141,46 +141,73 @@ def preview(wid: str):
 
 @app.post("/api/peaks/{wid}")
 def make_peaks(wid: str):
-    """算聲音波形（SPEC §4.3.3）。有預覽檔就從預覽檔算，比原檔小很多。"""
+    """產生聲音資料（audio.pcm，SPEC §4.3.0）與波形（peaks.u8，§4.3.3）。
+    有預覽檔就從預覽檔解，比原檔小很多。"""
     work = _need_work(wid)
     v = work["video"]
     if not v.get("audio_streams"):
         raise HTTPException(400, "這支影片沒有聲音")
     seconds = v["duration_frames"] * v["fps_den"] / v["fps_num"]
-    preview = store.work_dir(wid) / "preview.mp4"
+    d = store.work_dir(wid)
+    preview = d / "preview.mp4"
     src = preview if preview.exists() else Path(work["video_path"])
-    dst = store.work_dir(wid) / "peaks.u8"
 
     async def run():
-        proc = media.start_peaks(src)
-        builder, last = media.PeakBuilder(), -1.0
+        proc = media.start_audio(src)
+        tmp = d / "audio.pcm.part"
+        ok = False
         try:
-            # 每次讀約 10 秒的聲音
-            while chunk := await run_in_threadpool(proc.stdout.read, media.PEAK_RATE * 2 * 10):
-                await run_in_threadpool(builder.feed, chunk)
-                p = min(builder.samples / (seconds * media.PEAK_RATE), 1.0)
-                if p - last >= 0.01:
-                    last = p
-                    yield json.dumps({"progress": round(p, 3)}) + "\n"
+            with open(tmp, "wb") as pcm:
+                builder, last = media.AudioBuilder(pcm), -1.0
+                # 每次讀約 10 秒的聲音
+                while chunk := await run_in_threadpool(proc.stdout.read, media.AUDIO_RATE * 2 * 10):
+                    await run_in_threadpool(builder.feed, chunk)
+                    p = min(builder.samples / (seconds * media.AUDIO_RATE), 1.0)
+                    if p - last >= 0.01:
+                        last = p
+                        yield json.dumps({"progress": round(p, 3)}) + "\n"
             if await run_in_threadpool(proc.wait) != 0:
                 msg = proc.stderr.read().decode("utf-8", "replace").strip()[:200]
-                yield json.dumps({"error": "波形計算失敗：" + msg}, ensure_ascii=False) + "\n"
+                yield json.dumps({"error": "聲音處理失敗：" + msg}, ensure_ascii=False) + "\n"
                 return
-            dst.write_bytes(builder.finish())
+            tmp.rename(d / "audio.pcm")
+            (d / "peaks.u8").write_bytes(builder.finish())
+            ok = True
             yield json.dumps({"done": True}) + "\n"
         finally:
             if proc.poll() is None:  # 網頁斷線時停掉 ffmpeg
                 proc.kill()
                 proc.wait()
+            if not ok:
+                tmp.unlink(missing_ok=True)
     return StreamingResponse(run(), media_type="application/x-ndjson")
 
 
 @app.get("/api/peaks/{wid}")
 def get_peaks(wid: str):
-    f = store.work_dir(wid) / "peaks.u8"
-    if not f.exists():
-        raise HTTPException(404, "還沒有波形資料")
-    return FileResponse(f, media_type="application/octet-stream")
+    d = store.work_dir(wid)
+    # 波形和聲音資料要一起有；舊版只有波形時也重新產生
+    if not (d / "peaks.u8").exists() or not (d / "audio.pcm").exists():
+        raise HTTPException(404, "還沒有聲音資料")
+    return FileResponse(d / "peaks.u8", media_type="application/octet-stream")
+
+
+AUDIO_CHUNK_SEC = 20
+
+
+@app.get("/api/audio/{wid}/{k}")
+def audio_chunk(wid: str, k: int):
+    """第 k 段聲音（每段 20 秒），WAV 格式，給 Web Audio 播放（SPEC §4.3.0）。"""
+    f = store.work_dir(wid) / "audio.pcm"
+    if not f.exists() or k < 0:
+        raise HTTPException(404, "沒有聲音資料")
+    size = AUDIO_CHUNK_SEC * media.AUDIO_RATE * 2
+    with open(f, "rb") as fh:
+        fh.seek(k * size)
+        data = fh.read(size)
+    if not data:
+        raise HTTPException(404, "超出影片長度")
+    return Response(media.wav_header(len(data)) + data, media_type="audio/wav")
 
 
 @app.post("/api/srt/{wid}")

@@ -51,12 +51,130 @@ function tcToFrames(str) {
 }
 
 const frameToSec = (f) => (f * S.work.video.fps_den) / S.work.video.fps_num;
-const curFrame = () => Math.min(Math.floor(video.currentTime * fps() + 1e-3), S.work.video.duration_frames - 1);
+const curFrame = () => Math.min(Math.floor(playheadSec() * fps() + 1e-3), S.work.video.duration_frames - 1);
 
 function seekFrame(f) {
   f = Math.max(0, Math.min(f, S.work.video.duration_frames - 1));
-  video.currentTime = frameToSec(f) + 0.25 / fps(); // 落在該格中間，避免浮點誤差跳到前一格
+  const sec = frameToSec(f) + 0.25 / fps(); // 落在該格中間，避免浮點誤差跳到前一格
+  if (AUD.playing) restartAudio(sec);
+  else { video.currentTime = sec; prefetchAudio(sec); }
   draw(f); drawWave(f);
+}
+
+// ───────── 聲音播放（§4.3.0） ─────────
+// Safari 的影片元件按下播放後，聲音要晚約 0.3 秒才出來（實測中位數 284ms）。
+// 所以聲音改用 Web Audio 播放：後端把聲音切成每段 20 秒的 WAV，事先載入播放頭附近的片段，
+// 按下播放立即出聲。影片元件靜音只負責畫面，播放中一切時間以聲音為準
+
+const CHUNK_SEC = 20, MAX_CHUNKS = 12;
+const AUD = {
+  ctx: null, ready: false, wid: null,
+  chunks: new Map(),  // 段號 → AudioBuffer（Promise）
+  playing: false, session: 0, sources: [],
+  anchorCtx: 0, anchorSec: 0, nextK: 0,
+};
+
+function audioCtx() {
+  if (!AUD.ctx) AUD.ctx = new AudioContext();
+  return AUD.ctx;
+}
+
+// 目前「聽到的」位置（秒）：播放中看聲音時鐘並扣掉喇叭輸出延遲，暫停時看影片位置
+function playheadSec() {
+  if (!AUD.playing) return video.currentTime;
+  const c = AUD.ctx, heard = c.currentTime - AUD.anchorCtx - (c.outputLatency || 0);
+  return AUD.anchorSec + Math.max(0, heard);
+}
+
+const isPlaying = () => AUD.playing || !video.paused;
+
+function getChunk(k) {
+  if (!AUD.chunks.has(k)) {
+    const wid = AUD.wid;
+    const p = fetch(`/api/audio/${wid}/${k}`)
+      .then((r) => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); })
+      .then((b) => audioCtx().decodeAudioData(b));
+    p.catch(() => AUD.chunks.delete(k));
+    AUD.chunks.set(k, p);
+    // 只留最近用到的幾段，避免長片吃太多記憶體
+    while (AUD.chunks.size > MAX_CHUNKS) AUD.chunks.delete(AUD.chunks.keys().next().value);
+  }
+  return AUD.chunks.get(k);
+}
+
+function prefetchAudio(sec) {
+  if (!AUD.ready) return;
+  const k = Math.floor(sec / CHUNK_SEC);
+  getChunk(k).catch(() => {});
+  getChunk(k + 1).catch(() => {});
+}
+
+// 把第 k 段排在聲音時鐘上正確的時間點播放；來晚了就從中間接上
+function scheduleChunk(k, buf) {
+  const c = AUD.ctx, when = AUD.anchorCtx + (k * CHUNK_SEC - AUD.anchorSec);
+  const src = c.createBufferSource();
+  src.buffer = buf; src.connect(c.destination);
+  const late = c.currentTime - when;
+  if (late > 0) { if (late < buf.duration) src.start(c.currentTime, late); }
+  else src.start(when);
+  AUD.sources.push(src);
+  src.onended = () => (AUD.sources = AUD.sources.filter((x) => x !== src));
+}
+
+function stopAudio() {
+  AUD.session++;
+  for (const s of AUD.sources) { try { s.stop(); } catch {} }
+  AUD.sources = [];
+}
+
+async function playerPlay() {
+  if (!S.work) return;
+  if (!AUD.ready) { video.muted = false; video.play(); return; } // 聲音資料還沒好：先用影片本身的聲音
+  const c = audioCtx();
+  c.resume(); // 必須在使用者按鍵的當下呼叫
+  const pos = video.currentTime, k = Math.floor(pos / CHUNK_SEC), session = ++AUD.session;
+  let buf;
+  try { buf = await getChunk(k); } catch { AUD.ready = false; video.muted = false; video.play(); return; }
+  if (session !== AUD.session) return; // 等待期間又按了暫停或跳轉
+  AUD.anchorCtx = c.currentTime + 0.01; AUD.anchorSec = pos; AUD.nextK = k + 1; AUD.playing = true;
+  scheduleChunk(k, buf);
+  video.muted = true; video.play();
+  $("playBtn").textContent = "❚❚";
+}
+
+function playerPause() {
+  if (AUD.playing) {
+    const pos = playheadSec();
+    stopAudio(); AUD.playing = false;
+    video.pause(); video.currentTime = pos;
+    prefetchAudio(pos);
+  } else {
+    AUD.session++; // 取消還在等待載入的播放
+    video.pause();
+  }
+  $("playBtn").textContent = "▶";
+}
+
+function restartAudio(sec) {
+  stopAudio(); AUD.playing = false;
+  video.currentTime = sec;
+  playerPlay();
+}
+
+// 每格呼叫：提前載入並排好下一段；畫面和聲音差太多就對齊；播到結尾就停
+function audioTick() {
+  if (!AUD.playing) return;
+  const now = playheadSec(), total = frameToSec(S.work.video.duration_frames);
+  if (now >= total) { playerPause(); return; }
+  if (AUD.nextK * CHUNK_SEC - now < 8) {
+    const k = AUD.nextK++, session = AUD.session;
+    getChunk(k).then((buf) => { if (session === AUD.session) scheduleChunk(k, buf); }).catch(() => {});
+  }
+  if (!video.seeking && Math.abs(video.currentTime - now) > 0.15) video.currentTime = now;
+}
+
+function resetAudio(wid) {
+  stopAudio(); AUD.playing = false; AUD.ready = false; AUD.wid = wid; AUD.chunks.clear();
 }
 
 // ───────── 共用 ─────────
@@ -121,6 +239,7 @@ async function openVideo(path) {
     for (const id of ["srtBtn", "presetSel", "sizeInput", "yInput", "resetStyleBtn", "findBtn", "rulesBtn", "exportBtn", "playBtn", "seek"])
       $(id).disabled = false;
     WAVE.peaks = null; WAVE.status = ""; setSpan(0);
+    resetAudio(S.wid); video.muted = false;
     $("stageHint").hidden = true;
     $("seek").max = S.work.video.duration_frames - 1;
     $("dur").textContent = framesToTC(S.work.video.duration_frames);
@@ -410,6 +529,10 @@ async function loadPeaks() {
     WAVE.peaks = new Uint8Array(await res.arrayBuffer());
     WAVE.max = WAVE.peaks.reduce((m, v) => (v > m ? v : m), 1); // 以整支影片最大聲為滿格
     WAVE.status = "";
+    // 波形和聲音資料一起產生，有波形就代表可以用 Web Audio 播放了（§4.3.0）
+    // 正在用影片本身的聲音播放時不打斷，下次按播放才改走 Web Audio
+    AUD.ready = true; prefetchAudio(video.currentTime);
+    if (!isPlaying()) video.muted = true;
   } catch (e) {
     if (S.wid === wid) WAVE.status = String(e.message || e);
   }
@@ -432,48 +555,88 @@ function hitWave(x) {
   return best;
 }
 
+// 三種拖曳：邊緣＝改起點或終點；方塊中間＝整條移動；其他地方＝拖動時間（播放頭跟著走）。
+// 按下後移動不到 CLICK_PX 算點擊：跳到點擊的位置
+const CLICK_PX = 3;
+
 wc.addEventListener("pointerdown", (e) => {
   if (!S.work) return;
   e.preventDefault();
   document.activeElement?.blur?.(); // 讓快捷鍵（空白鍵、Cmd+Z）在拖完後立刻可用
-  const x = e.offsetX, h = hitWave(x);
-  if (h?.key) {
-    video.pause();
-    wc.setPointerCapture(e.pointerId);
-    WAVE.drag = { i: h.i, key: h.key, snap: JSON.stringify(state()), from: subs()[h.i][h.key] };
-    select(h.i, false);
-  } else {
-    if (h) select(h.i, false);
-    seekFrame(frameAtX(x, curFrame()));
-  }
+  wc.setPointerCapture(e.pointerId);
+  const h = hitWave(e.offsetX), f0 = curFrame();
+  const mode = h?.key ? "edge" : h ? "block" : "pan";
+  const s = h ? subs()[h.i] : null;
+  WAVE.drag = { mode, i: h?.i, key: h?.key, x0: e.offsetX, f0, moved: false,
+    snap: JSON.stringify(state()), from: s && { start: s.start, end: s.end } };
+  if (mode === "edge") { playerPause(); select(h.i, false); }
 });
 
 wc.addEventListener("pointermove", (e) => {
   if (!S.work) return;
   const d = WAVE.drag;
-  if (!d) { wc.style.cursor = hitWave(e.offsetX)?.key ? "ew-resize" : "pointer"; return; }
-  // 不能拖過相鄰字幕、不能超出影片，起點至少比終點早 1 格（已經重疊的維持原狀，不會跳動）
-  const all = subs(), s = all[d.i], fr = frameAtX(e.offsetX, curFrame());
-  if (d.key === "start") {
-    const lo = Math.min(d.i > 0 ? all[d.i - 1].end : 0, d.from);
-    s.start = Math.max(lo, Math.min(fr, s.end - 1));
+  if (!d) {
+    const h = hitWave(e.offsetX);
+    wc.style.cursor = h?.key ? "ew-resize" : h ? "move" : "grab";
+    return;
+  }
+  const dx = e.offsetX - d.x0;
+  if (!d.moved) {
+    if (Math.abs(dx) < CLICK_PX) return;
+    d.moved = true;
+    playerPause();
+    if (d.mode === "block") select(d.i, false);
+    if (d.mode === "pan") wc.style.cursor = "grabbing";
+  }
+  const all = subs(), total = S.work.video.duration_frames;
+  const dFrames = Math.round((dx / wave.clientWidth) * WAVE.span * fps());
+  if (d.mode === "pan") {
+    seekFrame(d.f0 - dFrames); // 往左拖＝往後面的時間走
+    return;
+  }
+  const s = all[d.i];
+  if (d.mode === "edge") {
+    // 不能拖過相鄰字幕、不能超出影片，起點至少比終點早 1 格（已經重疊的維持原狀，不會跳動）
+    const fr = frameAtX(e.offsetX, d.f0);
+    if (d.key === "start") {
+      const lo = Math.min(d.i > 0 ? all[d.i - 1].end : 0, d.from.start);
+      s.start = Math.max(lo, Math.min(fr, s.end - 1));
+    } else {
+      const hi = Math.max(d.i < all.length - 1 ? all[d.i + 1].start : total, d.from.end);
+      s.end = Math.min(hi, Math.max(fr, s.start + 1));
+    }
   } else {
-    const hi = Math.max(d.i < all.length - 1 ? all[d.i + 1].start : S.work.video.duration_frames, d.from);
-    s.end = Math.min(hi, Math.max(fr, s.start + 1));
+    // 整條移動、長度不變；同樣不能越過相鄰字幕或超出影片
+    const lo = Math.min(0, (d.i > 0 ? all[d.i - 1].end : 0) - d.from.start);
+    const hi = Math.max(0, (d.i < all.length - 1 ? all[d.i + 1].start : total) - d.from.end);
+    const k = Math.max(lo, Math.min(hi, dFrames));
+    s.start = d.from.start + k; s.end = d.from.end + k;
   }
   fillTimes(rowEl(d.i), s);
   drawnKey = null; draw(); drawWave();
 });
 
-function endDrag() {
+function endDrag(e, cancelled) {
   const d = WAVE.drag;
   if (!d) return;
   WAVE.drag = null;
-  if (subs()[d.i][d.key] !== d.from) { pushUndo(d.snap); changed(); validate(); } // 放開後算一步復原
+  wc.style.cursor = "";
+  if (!d.moved) {
+    // 點擊：點方塊選取該條，然後跳到點擊的位置（點在邊緣只選取）
+    if (!cancelled && d.mode !== "edge") {
+      if (d.mode === "block") select(d.i, false);
+      seekFrame(frameAtX(e.offsetX, d.f0));
+    }
+    return;
+  }
+  if (d.mode !== "pan") {
+    const s = subs()[d.i];
+    if (s.start !== d.from.start || s.end !== d.from.end) { pushUndo(d.snap); changed(); validate(); } // 放開後算一步復原
+  }
   drawWave();
 }
-wc.addEventListener("pointerup", endDrag);
-wc.addEventListener("pointercancel", endDrag);
+wc.addEventListener("pointerup", (e) => endDrag(e, false));
+wc.addEventListener("pointercancel", (e) => endDrag(e, true));
 
 function setSpan(dir) {
   const k = Math.max(0, Math.min(SPANS.length - 1, SPANS.indexOf(WAVE.span) + dir));
@@ -487,7 +650,7 @@ $("zoomOut").onclick = () => setSpan(1);
 
 // ───────── 播放 ─────────
 
-function togglePlay() { if (!S.work) return; video.paused ? video.play() : video.pause(); }
+function togglePlay() { if (!S.work) return; isPlaying() ? playerPause() : playerPlay(); }
 $("playBtn").onclick = togglePlay;
 video.addEventListener("play", () => ($("playBtn").textContent = "❚❚"));
 video.addEventListener("pause", () => ($("playBtn").textContent = "▶"));
@@ -498,6 +661,7 @@ let lastFrame = -1;
 function tick() {
   requestAnimationFrame(tick);
   if (!S.work) return;
+  audioTick();
   const f = curFrame();
   if (f === lastFrame) return;
   lastFrame = f;
@@ -511,7 +675,7 @@ function tick() {
     rowEl(S.playing)?.classList.remove("playing");
     S.playing = i;
     rowEl(i)?.classList.add("playing");
-    if (i >= 0 && !video.paused && !list.contains(document.activeElement)) select(i, false);
+    if (i >= 0 && isPlaying() && !list.contains(document.activeElement)) select(i, false);
   }
 }
 requestAnimationFrame(tick);
@@ -751,8 +915,8 @@ document.addEventListener("keydown", (e) => {
   const step = e.shiftKey ? nominal() : 1;
   let done = true;
   if (e.key === " ") togglePlay();
-  else if (e.key === "ArrowLeft" && !cmd) { video.pause(); seekFrame(curFrame() - step); }
-  else if (e.key === "ArrowRight" && !cmd) { video.pause(); seekFrame(curFrame() + step); }
+  else if (e.key === "ArrowLeft" && !cmd) { playerPause(); seekFrame(curFrame() - step); }
+  else if (e.key === "ArrowRight" && !cmd) { playerPause(); seekFrame(curFrame() + step); }
   else if (e.key === "ArrowUp" && !cmd) jumpSub(-1);
   else if (e.key === "ArrowDown" && !cmd) jumpSub(1);
   else if (e.key === "Enter" && S.sel >= 0) {
@@ -773,7 +937,7 @@ function jumpSub(dir) {
   let i;
   if (dir > 0) i = all.findIndex((s) => s.start > f);
   else { i = -1; all.forEach((s, k) => { if (s.start < f) i = k; }); }
-  if (i >= 0) { video.pause(); select(i, true); }
+  if (i >= 0) { playerPause(); select(i, true); }
 }
 
 // ───────── 尋找與取代（§4.5）、取代規則（§4.6） ─────────
