@@ -236,7 +236,7 @@ async function openVideo(path) {
     S.wid = data.id; S.work = data.work; S.undo = []; S.redo = []; S.sel = -1; S.playing = -1;
     try { localStorage.setItem("submaker.lastPath", path); } catch {}
     $("pathInput").value = S.work.video_path;
-    for (const id of ["srtBtn", "presetSel", "sizeInput", "yInput", "resetStyleBtn", "findBtn", "rulesBtn", "exportBtn", "playBtn", "seek"])
+    for (const id of ["srtBtn", "presetSel", "sizeInput", "yInput", "resetStyleBtn", "findBtn", "rulesBtn", "cleanBtn", "exportBtn", "playBtn", "seek"])
       $(id).disabled = false;
     WAVE.peaks = null; WAVE.status = ""; setSpan(0);
     resetAudio(S.wid); video.muted = false;
@@ -248,7 +248,7 @@ async function openVideo(path) {
       (v.video_streams > 1 ? `（${v.video_streams} 條影像軌，只用第一條）` : "");
     document.title = `${S.work.name} — SubMaker`;
     loadVideoSrc(data.has_preview);
-    syncStyleInputs(); renderList(); draw();
+    syncStyleInputs(); renderList(); draw(); showCleanSummary();
   } catch (e) {
     message("開啟影片失敗：\n" + e.message);
   }
@@ -315,16 +315,18 @@ $("srtFile").onchange = async () => {
     });
     const last = await readStream(res, (x) => {
       if (x.total) busy("轉換中", x.progress / x.total, `${x.progress} / ${x.total}`);
+      if (x.stage) busy(x.stage, 1, "");
     });
     if (!last?.done) throw new Error("轉換沒有完成");
     S.work = last.work; S.undo = []; S.redo = []; S.sel = -1;
-    renderList(); draw();
+    renderList(); draw(); showCleanSummary();
     // 載入時自動套用了哪些「直接全換」規則（§4.2）
     const done = (last.applied || []).filter((a) => a.count);
     message(`已載入 ${subs().length} 條字幕（${last.encoding}），並轉成繁體。\n\n` +
       (done.length ? "自動套用的取代規則：\n" + done.map((a) => `　${a.find} → ${a.replace}：${a.count} 處`).join("\n")
         : "「直接全換」的規則沒有找到可以取代的地方。") +
-      "\n\n「逐條確認」的規則（例如 里→裡）請從「取代規則」手動套用。");
+      "\n\n「逐條確認」的規則（例如 里→裡）請從「取代規則」手動套用。" +
+      (last.cleaned ? `\n\n自動整理：改了 ${last.cleaned} 處，細節按字幕清單上方的「查看」。` : ""));
   } catch (e) {
     message("載入字幕失敗：\n" + e.message);
   } finally { busy(null); }
@@ -841,8 +843,9 @@ function validate() {
     if (s.end <= s.start) errs.push("起點沒有早於終點");
     if (s.end > total) errs.push("超出影片長度");
     if (i + 1 < all.length && all[i + 1].start < s.end) errs.push("和下一條時間重疊");
+    const warn = textWidth(s.text) > MAX_WIDTH ? `提醒：超過 ${MAX_WIDTH} 字（可按「自動整理」拆句）` : "";
     // 只改有變化的，避免每次打字都讓整份清單重新排版
-    const row = rowEl(i), msg = errs.join("、");
+    const row = rowEl(i), msg = [...errs, warn].filter(Boolean).join("、");
     if (row && row._err !== msg) {
       row._err = msg;
       row.classList.toggle("bad", errs.length > 0);
@@ -884,7 +887,7 @@ function changed() {
 }
 function save() {
   clearTimeout(saveTimer); saveTimer = null;
-  const body = state();
+  const body = { ...state(), cleanup_log: S.work.cleanup_log || [] };
   saving = saving.then(async () => {
     setSaveStatus("儲存中…");
     try { await api("PUT", `/api/work/${S.wid}`, body); setSaveStatus(saveTimer ? "尚未儲存" : "已自動儲存"); }
@@ -1047,6 +1050,7 @@ const MODES = { all: "直接全換", confirm: "逐條確認" };
 
 async function openRules() {
   rules = await (await api("GET", "/api/rules")).json();
+  $("keepText").value = (await (await api("GET", "/api/keep")).json()).join("\n");
   renderRules();
   $("rulesStatus").textContent = "";
   $("rulesDlg").showModal();
@@ -1079,6 +1083,8 @@ $("addRuleBtn").onclick = () => { rules.push({ find: "", replace: "", mode: "all
 
 async function saveRules() {
   rules = await (await api("PUT", "/api/rules", rules)).json();
+  const keep = $("keepText").value.split(/[\n、,，]/).map((w) => w.trim()).filter(Boolean);
+  $("keepText").value = (await (await api("PUT", "/api/keep", keep)).json()).join("\n");
   renderRules();
   $("rulesStatus").textContent = "已儲存";
 }
@@ -1110,6 +1116,102 @@ $("applyRulesBtn").onclick = async () => {
   $("findDlg").showModal();
   renderHits();
 };
+
+// ───────── 自動整理（§4.6.1） ─────────
+// 載入 srt 時後端會自動跑；這個按鈕對目前的字幕再跑一次。整理完不跳出清單，只顯示摘要
+
+const MAX_WIDTH = 18;
+const RULE_ORDER = ["語助詞", "疊字", "數字", "空格", "大寫", "拆句"];
+
+// 中文與全形符號算 1，英文字母、數字、半形符號算 0.5，空格不算（和後端 cleanup.width 相同）
+function textWidth(t) {
+  let w = 0;
+  for (const ch of t) {
+    if (ch === " " || ch === "　" || ch === "\n") continue;
+    w += ch.codePointAt(0) < 0x2e80 ? 0.5 : 1;
+  }
+  return w;
+}
+
+function showCleanSummary() {
+  const log = S.work?.cleanup_log || [];
+  $("cleanSummary").hidden = !log.length;
+  if (!log.length) return;
+  const dropped = log.filter((e) => e.dropped).length, splits = log.filter((e) => e.rule === "拆句").length;
+  $("cleanSummaryTxt").textContent = `自動整理：改了 ${log.length} 處` +
+    (dropped ? `，刪了 ${dropped} 條` : "") + (splits ? `，拆了 ${splits} 條` : "");
+}
+
+$("cleanBtn").onclick = async () => {
+  try {
+    busy("自動整理中", 1, "");
+    await save();
+    const r = await (await api("POST", `/api/cleanup/${S.wid}`)).json();
+    snapshot(); // 整個整理算一步，可以 Cmd+Z 復原
+    S.work.subtitles = r.subtitles; S.work.next_id = r.next_id; S.work.cleanup_log = r.cleanup_log;
+    renderList(); changed(); draw(); showCleanSummary();
+  } catch (e) {
+    message("自動整理失敗：\n" + e.message);
+  } finally { busy(null); }
+};
+
+$("cleanViewBtn").onclick = () => { renderCleanLog(); $("cleanDlg").showModal(); };
+
+function renderCleanLog() {
+  const log = S.work.cleanup_log || [], box = $("cleanList");
+  const counts = RULE_ORDER.map((r) => [r, log.filter((e) => e.rule === r).length]).filter(([, n]) => n);
+  $("cleanCounts").textContent = counts.map(([r, n]) => `${r} ${n}`).join("　") +
+    "　｜　疊字刪錯了就按「還原並記住」，之後所有影片都不會再刪";
+  box.innerHTML = "";
+  const mk = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+  for (const rule of RULE_ORDER) {
+    const items = log.filter((e) => e.rule === rule);
+    if (!items.length) continue;
+    box.append(mk("div", "cleanGroup", `${rule}（${items.length}）`));
+    for (const e of items) {
+      const row = mk("div", "cleanItem");
+      const i = subs().findIndex((s) => s.id === e.sid);
+      const where = mk("span", "where mono" + (i < 0 ? " gone" : ""), i < 0 ? "已刪除" : `#${i + 1}`);
+      if (i >= 0) where.onclick = () => { $("cleanDlg").close(); select(i, true); };
+      const chg = mk("span", "chg");
+      chg.append(mk("del", "", e.before), " → ", e.dropped ? "（整條刪除）" : e.after);
+      row.append(where, chg);
+      if (rule === "疊字") {
+        const b = mk("button", "small", e.restored ? "已還原" : "還原並記住");
+        b.disabled = !!e.restored;
+        b.onclick = () => restoreRepeat(e, b);
+        row.append(b);
+      }
+      box.append(row);
+    }
+  }
+}
+
+// 還原一處刪掉的疊字，並把它加進疊詞保留清單（學習）
+async function restoreRepeat(e, btn) {
+  try {
+    const keep = await (await api("GET", "/api/keep")).json();
+    if (!keep.includes(e.before)) await api("PUT", "/api/keep", [...keep, e.before]);
+  } catch (err) { message("記住失敗：\n" + err.message); return; }
+  e.restored = true;
+  btn.textContent = "已還原"; btn.disabled = true;
+  const i = subs().findIndex((s) => s.id === e.sid);
+  const t = i >= 0 ? subs()[i].text : "";
+  // 找離原本位置最近的那個字（之後加空格等步驟可能讓位置往後移一點）
+  let best = -1;
+  for (let k = t.indexOf(e.after); k >= 0; k = t.indexOf(e.after, k + 1))
+    if (best < 0 || Math.abs(k - e.pos) < Math.abs(best - e.pos)) best = k;
+  if (best < 0) {
+    message(`已記住「${e.before}」，之後不會再刪。\n但這條字幕已經改過，找不到原本的位置，請手動改回。`);
+    changed();
+    return;
+  }
+  snapshot();
+  subs()[i].text = t.slice(0, best) + e.before + t.slice(best + e.after.length);
+  const ta = rowEl(i)?.querySelector("textarea");
+  if (ta) { ta.value = subs()[i].text; fit(ta); }
+  changed(); validate(); drawnKey = null; draw();
+}
 
 // ───────── 匯出（§4.8、§5） ─────────
 

@@ -16,5 +16,6 @@
 - repo 是 **public**。`.gitignore` 是白名單式的，只收程式和文件
 - 測試樣本放 `samples/`，工作檔放 `work/`，兩者都不進 git
 - 樣本中的 `.fcpxmld` 含使用者名稱與資料庫路徑，內容不可貼進任何會進 git 的檔案
-- 安裝套件前先列清單給使用者確認；套件裝在專案的 `.venv/`，不動系統
+- 安裝套件前先列清單給使用者確認（Swift 套件、Python 套件、聽寫模型都算）；Python 套件裝在專案的 `.venv/`，不動系統
+- v2 起是 Swift 原生 App；`legacy-python/` 是 v1 Python 版，當標準答案與退路，不要刪也不要改壞（見 SPEC §8）
 - commit、push、建立 GitHub repo 前先問

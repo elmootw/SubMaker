@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent / "work"
 RULES_FILE = ROOT / "rules.json"
+KEEP_FILE = ROOT / "keep_repeats.json"  # 疊詞保留清單（SPEC §4.6.1）
 
 # SPEC §4.6 的預設內容
 DEFAULT_RULES = [
@@ -60,3 +61,14 @@ def load_rules() -> list[dict]:
 
 def save_rules(rules: list[dict]) -> None:
     _write_json(RULES_FILE, rules)
+
+
+def load_keep() -> list[str]:
+    from .cleanup import DEFAULT_KEEP
+    if KEEP_FILE.exists():
+        return json.loads(KEEP_FILE.read_text(encoding="utf-8"))
+    return list(DEFAULT_KEEP)
+
+
+def save_keep(words: list[str]) -> None:
+    _write_json(KEEP_FILE, words)

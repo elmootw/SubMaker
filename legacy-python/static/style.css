@@ -99,6 +99,19 @@ main { display: grid; grid-template-columns: minmax(0, 1fr) clamp(380px, 38vw, 5
 .acts { grid-column: 2; display: flex; gap: 6px; }
 .acts button { padding: 1px 7px; font-size: 12px; }
 .errTxt { grid-column: 2; color: var(--bad); font-size: 12px; }
+.errTxt:empty { display: none; }
+.dim { color: var(--dim); }
+button.small { padding: 1px 8px; font-size: 12px; }
+#cleanSummary { color: var(--dim); font-size: 12px; white-space: nowrap; }
+#keepText { width: 100%; font: 14px/1.5 -apple-system, "PingFang TC", sans-serif; color: var(--text);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 5px; padding: 6px; resize: vertical; }
+#cleanList { overflow-y: auto; border: 1px solid var(--line); border-radius: 5px; }
+.cleanGroup { padding: 6px 8px; background: var(--panel2); font-weight: 600; position: sticky; top: 0; }
+.cleanItem { display: flex; align-items: baseline; gap: 8px; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+.cleanItem .where { color: var(--accent); cursor: pointer; min-width: 56px; }
+.cleanItem .where.gone { color: var(--dim); cursor: default; }
+.cleanItem .chg { flex: 1; font-size: 14px; }
+.cleanItem del { color: var(--dim); }
 
 #busy { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: grid; place-items: center; z-index: 10; }
 .busyBox { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 20px 28px; min-width: 300px; text-align: center; }

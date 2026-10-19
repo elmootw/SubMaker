@@ -27,6 +27,7 @@
   <div class="group">
     <button id="findBtn" disabled title="Cmd + F">尋找與取代</button>
     <button id="rulesBtn" disabled>取代規則</button>
+    <button id="cleanBtn" disabled title="刪語助詞、疊字，數字、空格、大寫，超過 18 字拆句">自動整理</button>
   </div>
   <div class="group right">
     <span id="saveStatus"></span>
@@ -66,6 +67,7 @@
   <section id="right">
     <div id="listHead">
       <span id="listTitle">字幕</span>
+      <span id="cleanSummary" hidden><span id="cleanSummaryTxt"></span> <button id="cleanViewBtn" class="small">查看</button></span>
       <button id="problemBtn" class="warn" hidden></button>
     </div>
     <div id="list"></div>
@@ -112,13 +114,26 @@
     <thead><tr><th>原字</th><th>換成</th><th>方式</th><th>備註</th><th></th></tr></thead>
     <tbody></tbody>
   </table>
+  <div class="dlgBar"><button id="addRuleBtn" type="button">新增規則</button></div>
+  <!-- 疊詞保留清單（SPEC §4.6.1）：自動整理不刪這些疊詞 -->
+  <label for="keepText"><strong>疊詞保留清單</strong>　自動整理時不刪這些疊詞；一行一個，例如「剛剛」「非常非常」</label>
+  <textarea id="keepText" rows="5" spellcheck="false"></textarea>
   <div class="dlgBar">
-    <button id="addRuleBtn" type="button">新增規則</button>
     <span id="rulesStatus"></span>
     <span class="spacer"></span>
     <button id="saveRulesBtn" type="button">儲存</button>
     <button id="applyRulesBtn" type="button" class="primary">儲存並一鍵套用</button>
   </div>
+</dialog>
+
+<!-- 自動整理結果（SPEC §4.6.1）：不自動跳出，按摘要的「查看」才打開 -->
+<dialog id="cleanDlg">
+  <form method="dialog" class="dlgHead">
+    <strong>自動整理結果</strong>
+    <button value="close">關閉</button>
+  </form>
+  <div id="cleanCounts" class="dim"></div>
+  <div id="cleanList"></div>
 </dialog>
 
 <!-- 訊息 -->

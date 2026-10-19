@@ -1,6 +1,8 @@
 """SubMaker 本機網站後端。執行：.venv/bin/python app.py，再用 Safari 開 http://127.0.0.1:8765"""
 import json
+import logging
 import mimetypes
+import re
 from pathlib import Path
 from urllib.parse import quote, unquote
 
@@ -11,12 +13,46 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from submaker import fcpxml, media, srt, store
+from submaker import cleanup, fcpxml, media, srt, store
 
 HERE = Path(__file__).resolve().parent
 app = FastAPI()
 app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
 converter = opencc.OpenCC("s2twp")  # SPEC §4.2：台灣用字
+to_simplified = opencc.OpenCC("t2s")
+ASCII_WORD = re.compile(r"[A-Za-z0-9\-'.%]")
+ASCII_WORD_END = re.compile(r"[A-Za-z0-9\-'.%]$")
+
+
+def segment(text: str) -> list[str]:
+    """中文斷詞（SPEC §4.6.1 拆句用）。jieba 的字典以簡體為主，所以先轉簡體再斷；
+    轉換後長度不同就直接斷繁體。回傳的是原文（繁體）切出來的片段。"""
+    import jieba
+    jieba.setLogLevel(logging.WARNING)
+    simp = to_simplified.convert(text)
+    src = simp if len(simp) == len(text) else text
+    out, pos = [], 0
+    for tok in jieba.cut(src, HMM=True):
+        piece = text[pos:pos + len(tok)]
+        pos += len(tok)
+        # 相連的英文、數字、連字號合回一段，拆句時才不會切開「auto-automatic」「100%」
+        if out and ASCII_WORD.match(piece) and ASCII_WORD_END.search(out[-1]):
+            out[-1] += piece
+        else:
+            out.append(piece)
+    return out
+
+
+def run_cleanup(wid: str, work: dict) -> list[dict]:
+    """對工作檔的字幕執行自動整理，直接改 work；回傳改動紀錄。"""
+    v = work["video"]
+    peaks_file = store.work_dir(wid) / "peaks.u8"
+    peaks = peaks_file.read_bytes() if peaks_file.exists() else None
+    subs, log, work["next_id"] = cleanup.run(work["subtitles"], store.load_keep(), work["next_id"],
+                                            v["fps_num"] / v["fps_den"], peaks, segment)
+    work["subtitles"] = subs
+    work["cleanup_log"] = log
+    return log
 
 
 @app.middleware("http")
@@ -248,8 +284,11 @@ async def load_srt(wid: str, req: Request):
                 s["text"] = s["text"].replace(r["find"], r["replace"])
             applied.append({"find": r["find"], "replace": r["replace"], "count": n})
         work.update(subtitles=subs, next_id=total + 1, srt_name=name)
+        # 接著自動整理（SPEC §4.6.1）
+        yield {"stage": "自動整理中"}
+        log = run_cleanup(wid, work)
         store.save_work(wid, work)
-        yield {"done": True, "encoding": encoding, "applied": applied, "work": work}
+        yield {"done": True, "encoding": encoding, "applied": applied, "cleaned": len(log), "work": work}
     return _ndjson(run())
 
 
@@ -258,11 +297,31 @@ async def save_work(wid: str, req: Request):
     """自動存檔。只接受前端可以編輯的欄位，影片資訊以後端為準。"""
     work = _need_work(wid)
     body = await req.json()
-    for key in ("subtitles", "style", "preset", "next_id"):
+    for key in ("subtitles", "style", "preset", "next_id", "cleanup_log"):
         if key in body:
             work[key] = body[key]
     store.save_work(wid, work)
     return {"ok": True}
+
+
+@app.post("/api/cleanup/{wid}")
+def cleanup_now(wid: str):
+    """「自動整理」按鈕：對已存檔的字幕再跑一次。不存檔，交給前端套用（才能 Cmd+Z 復原）。"""
+    work = _need_work(wid)
+    log = run_cleanup(wid, work)
+    return {"subtitles": work["subtitles"], "next_id": work["next_id"], "cleanup_log": log}
+
+
+@app.get("/api/keep")
+def get_keep():
+    return store.load_keep()
+
+
+@app.put("/api/keep")
+async def put_keep(req: Request):
+    words = [w.strip() for w in await req.json() if isinstance(w, str) and w.strip()]
+    store.save_keep(list(dict.fromkeys(words)))  # 去掉重複，保留順序
+    return store.load_keep()
 
 
 @app.get("/api/rules")

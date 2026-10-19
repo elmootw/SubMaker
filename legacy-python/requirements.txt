@@ -5,6 +5,7 @@ click==8.5.0
 fastapi==0.142.2
 h11==0.16.0
 idna==3.20
+jieba==0.42.1
 OpenCC==1.4.2
 opentelemetry-api==1.45.0
 pydantic==2.13.5
